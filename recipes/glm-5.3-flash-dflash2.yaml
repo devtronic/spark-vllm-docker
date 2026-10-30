@@ -84,15 +84,18 @@ env:
   FLASHINFER_DISABLE_VERSION_CHECK: "1"
   PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
   VLLM_WORKER_MULTIPROC_METHOD: "spawn"
-  # The hybrid KV (MLA + mamba + drafter sliding-window) auto-rescales our
-  # 2304-token attention block up to 6912 (to >= mamba page), then wants to
-  # split that into 256-token kernel blocks. The default BLNHC layout is not
-  # dense under that split. BLHNC rearranges the dimensions and is the only
-  # other layout this vLLM build supports (LBNHC was renamed/removed; the
-  # error message's "e.g. LBNHC" suggestion is stale). If BLHNC also
-  # rejects the split, pass --block-size 256 on the CLI as a fallback;
-  # expect slightly higher allocator overhead but universal compatibility.
-  VLLM_KV_CACHE_LAYOUT: "BLHNC"
+  # Prefix caching forces mamba-cache alignment ("align" mode), which forces
+  # the attention block to be auto-rescaled to >= the mamba page size, which
+  # then creates a stride mismatch under both supported KV layouts (BLNHC,
+  # BLHNC) when the backend tries to split the manager block into 256-token
+  # kernel blocks. The sibling repo's patch_glm5_drafter_group.py avoided
+  # this by partitioning the drafter group out of the main KV layout before
+  # the rescale; upstream vLLM has refactored that code into
+  # v1/attention/backends/mla/indexer.py and never ported the drafter-group
+  # fix. Here we trade off prefix caching to avoid the rescale chain; the
+  # engine then boots cleanly with block_size as specified. Pick a layout
+  # explicitly to pin behaviour and keep the two supported options at hand.
+  VLLM_KV_CACHE_LAYOUT: "BLNHC"
 
 command: |
   vllm serve nvidia/GLM-5.3-Flash-FP4-Local \
@@ -111,6 +114,7 @@ command: |
     --kv-cache-dtype fp8_e4m3 \
     --kv-cache-memory {kv_cache_memory_bytes} \
     --load-format b12x \
+    --no-enable-prefix-caching \
     --speculative-config '{{"method":"dflash","model":"{drafter_model}","num_speculative_tokens":{num_speculative_tokens},"kv_cache_dtype":"auto"}}' \
     --reasoning-parser glm45 \
     --tool-call-parser glm47 \
