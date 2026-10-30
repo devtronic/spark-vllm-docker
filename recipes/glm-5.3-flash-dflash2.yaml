@@ -87,15 +87,20 @@ env:
   VLLM_WORKER_MULTIPROC_METHOD: "spawn"
   # Mamba-cache alignment unconditionally rescales the attention manager
   # block up to the mamba page size (5120 tokens on this model), regardless
-  # of whether prefix caching is on. The batch-first layouts BLNHC/BLHNC
-  # include per-layer padding in their stride, so a rescaled 5120-token
-  # manager block does not split cleanly into 20 x 256-token kernel pages
-  # - create_kv_cache_views then raises "block stride != page". LBNHC is
-  # layer-compact: pages are dense and unpadded, so the split works. Use
-  # it. (If a future image reintroduces the drafter-group partitioning
-  # that the sibling repo's patch_glm5_drafter_group.py performed, BLNHC
-  # could become usable again - see mods/glm-5.3-dflash2/README.md.)
-  VLLM_KV_CACHE_LAYOUT: "LBNHC"
+  # of whether prefix caching is on. The current image accepts only
+  # BLNHC and BLHNC (resolve_kv_cache_layout: valid layouts: ['BLNHC',
+  # 'BLHNC'] - the "LBNHC" hint in the create_kv_cache_views error
+  # message is stale and gets rejected by the validator). BLNHC's stride
+  # includes the padding needed to interleave heads inside the manager
+  # block, so a 5120-token manager block does not split into 20 x
+  # 256-token kernel pages and create_kv_cache_views raises
+  # "block stride != page". BLHNC is heads-first: a single head's
+  # N_blocks are contiguous, so the kernel split walks N_blocks within
+  # one head without striding across H, which is dense. If BLHNC ever
+  # starts hitting the same stride check (e.g. after a future layout
+  # refactor), port the sibling repo's patch_glm5_drafter_group.py as a
+  # focused mod - see mods/glm-5.3-dflash2/README.md.
+  VLLM_KV_CACHE_LAYOUT: "BLHNC"
 
 command: |
   vllm serve nvidia/GLM-5.3-Flash-FP4-Local \
