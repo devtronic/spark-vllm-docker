@@ -62,12 +62,13 @@ defaults:
   max_model_len: 262144
   max_num_seqs: 6
   max_num_batched_tokens: 8192
-  # block_size 2304 is the sibling launcher's value, co-designed with the old
-  # drafter-group KV layout gate. Upstream has refactored the GLM-5-Next KV
-  # grouping; if the recipe boots cleanly leave this alone, if it hits an
-  # allocator or kernel-block error try the vLLM default by passing
-  # --block-size 16 on the CLI.
-  block_size: 2304
+  # Nominal input block size. Mamba-cache alignment rescales the attention
+  # block to the mamba page size unconditionally (interface.py:1051,
+  # "Setting attention block size to 5120 tokens to ensure that attention
+  # page size is >= mamba page size"), so the value here is cosmetic -
+  # vLLM's allowlist snaps anything exotic back to 256 anyway. Leave at
+  # 256 to match what the engine actually uses as its kernel-block grid.
+  block_size: 256
   num_speculative_tokens: 7
   # 8 GiB pinned FP8 KV pool (~714k tokens at 262k ctx on the shipped build).
   kv_cache_memory_bytes: 8589934592
@@ -84,18 +85,17 @@ env:
   FLASHINFER_DISABLE_VERSION_CHECK: "1"
   PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
   VLLM_WORKER_MULTIPROC_METHOD: "spawn"
-  # Prefix caching forces mamba-cache alignment ("align" mode), which forces
-  # the attention block to be auto-rescaled to >= the mamba page size, which
-  # then creates a stride mismatch under both supported KV layouts (BLNHC,
-  # BLHNC) when the backend tries to split the manager block into 256-token
-  # kernel blocks. The sibling repo's patch_glm5_drafter_group.py avoided
-  # this by partitioning the drafter group out of the main KV layout before
-  # the rescale; upstream vLLM has refactored that code into
-  # v1/attention/backends/mla/indexer.py and never ported the drafter-group
-  # fix. Here we trade off prefix caching to avoid the rescale chain; the
-  # engine then boots cleanly with block_size as specified. Pick a layout
-  # explicitly to pin behaviour and keep the two supported options at hand.
-  VLLM_KV_CACHE_LAYOUT: "BLNHC"
+  # Mamba-cache alignment unconditionally rescales the attention manager
+  # block up to the mamba page size (5120 tokens on this model), regardless
+  # of whether prefix caching is on. The batch-first layouts BLNHC/BLHNC
+  # include per-layer padding in their stride, so a rescaled 5120-token
+  # manager block does not split cleanly into 20 x 256-token kernel pages
+  # - create_kv_cache_views then raises "block stride != page". LBNHC is
+  # layer-compact: pages are dense and unpadded, so the split works. Use
+  # it. (If a future image reintroduces the drafter-group partitioning
+  # that the sibling repo's patch_glm5_drafter_group.py performed, BLNHC
+  # could become usable again - see mods/glm-5.3-dflash2/README.md.)
+  VLLM_KV_CACHE_LAYOUT: "LBNHC"
 
 command: |
   vllm serve nvidia/GLM-5.3-Flash-FP4-Local \
