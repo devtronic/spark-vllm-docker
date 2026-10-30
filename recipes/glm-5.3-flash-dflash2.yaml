@@ -84,14 +84,15 @@ env:
   FLASHINFER_DISABLE_VERSION_CHECK: "1"
   PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
   VLLM_WORKER_MULTIPROC_METHOD: "spawn"
-  # LBNHC = layer-compact, blocks-first layout. Needed because the hybrid KV
-  # (MLA + mamba + drafter sliding-window) auto-rescales our 2304-token
-  # attention block up to 6912 (to >= mamba page), then wants to split that
-  # into 256-token kernel blocks. The default BLNHC layout is not dense when
-  # the manager block is bigger than the per-layer stride. The sibling repo
-  # avoided this with patch_glm5_drafter_group.py's exact-fit gate; here we
-  # just pick the layout vLLM itself recommends in the error path.
-  VLLM_KV_CACHE_LAYOUT: "LBNHC"
+  # The hybrid KV (MLA + mamba + drafter sliding-window) auto-rescales our
+  # 2304-token attention block up to 6912 (to >= mamba page), then wants to
+  # split that into 256-token kernel blocks. The default BLNHC layout is not
+  # dense under that split. BLHNC rearranges the dimensions and is the only
+  # other layout this vLLM build supports (LBNHC was renamed/removed; the
+  # error message's "e.g. LBNHC" suggestion is stale). If BLHNC also
+  # rejects the split, pass --block-size 256 on the CLI as a fallback;
+  # expect slightly higher allocator overhead but universal compatibility.
+  VLLM_KV_CACHE_LAYOUT: "BLHNC"
 
 command: |
   vllm serve nvidia/GLM-5.3-Flash-FP4-Local \
