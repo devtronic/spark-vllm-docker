@@ -102,7 +102,7 @@ command: |
     --kv-cache-dtype fp8_e4m3 \
     --kv-cache-memory {kv_cache_memory_bytes} \
     --load-format b12x \
-    --speculative-config '{{"method":"dflash","model":"{drafter_model}","num_speculative_tokens":{num_speculative_tokens}}}' \
+    --speculative-config '{{"method":"dflash","model":"{drafter_model}","num_speculative_tokens":{num_speculative_tokens},"kv_cache_dtype":"auto"}}' \
     --reasoning-parser glm45 \
     --tool-call-parser glm47 \
     --enable-auto-tool-choice \
