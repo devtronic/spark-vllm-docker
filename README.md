@@ -335,6 +335,34 @@ for additional launcher options.
 
 ## CHANGELOG
 
+### 2026-10-30
+
+#### GLM 5.3 Flash DFlash2 recipes
+
+Added two cluster-only recipes for GLM-5.3-Flash with **DFlash2** speculative
+decoding on two DGX Spark nodes, ported from
+[tonyd2wild/GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark](https://github.com/tonyd2wild/GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark):
+
+- [GLM-5.3-Flash-NVFP4 with DFlash2](recipes/glm-5.3-flash-dflash2.yaml):
+  the proven `sm121-v11-dflash2` lane — `nvidia/GLM-5.3-Flash-NVFP4` target,
+  `incoai/GLM-5.3-Flash-DFlash2` drafter, Marlin, 8 GiB KV pin (~714K token
+  pool), 262K context. Pull the recipe image on every node before first use;
+  the runtime overlays (SM121 kpool fix, #18 prefix-cache repair, vision chat
+  template, optional b12x RoCE adapter) are applied by
+  [mods/glm53-dflash2](mods/glm53-dflash2).
+- [GLM-5.3-Flash DFlash2 Speed](recipes/glm-5.3-flash-dflash2-speed.yaml):
+  the knapcio speed stack ported to TP2 (1.4–2.1x decode of the lane above,
+  44 s weight load) — adaptive draft truncation, certified head, L2 prefetch,
+  RoCE one-shot collectives. Needs a one-time image build
+  (`knapcio Dockerfile.roce`) and checkpoint conversion
+  (`scripts/build_lossless8.sh`), then `-v <MODEL_DIR>:/model:ro
+  -v <DRAFT_DIR>:/draft:ro` at launch. Overlays from
+  [mods/glm53-dflash2-speed](mods/glm53-dflash2-speed).
+
+Both use `mods/drop-caches`; the unified-memory nodes need the periodic cache
+drop while weights load. See the recipe headers for the full prerequisite
+lists and tuning notes.
+
 ### 2026-10-16
 
 'glm-5.3-flash` recipe now uses a new FP4-Local checkpoint from NVIDIA, replacing an older version hosted in local-inference-lab repository. As with Qwen, this checkpoint features compressed scales and is QAD quantized. Up to 2M KV cache on dual Sparks!

@@ -1,0 +1,117 @@
+# Recipe: GLM-5.3-Flash-NVFP4 with DFlash2 speculative decoding
+# GLM 5.3 Flash (NVFP4) with the incoai DFlash2 drafter on a dual DGX Spark cluster.
+#
+# Port of the proven recipe in tonyd2wild/GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark
+# (CURRENT.md lane): TP2 across two Sparks, 262K context, fp8 KV, ~47 tok/s code
+# decode single-stream. The sibling recipe glm-5.3-flash.yaml is the MTP lane on
+# the B12X stack; this one is the DFlash2 lane on the GLM-5.3 day-0 vLLM image.
+#
+# Prerequisites on EVERY cluster node (see GLM repo README/CURRENT.md):
+#   1. docker pull ghcr.io/tonyd2wild/vllm-glm53-flash:sm121-v11-dflash2
+#      Pull it BEFORE the first launch: if the tag is missing locally, the image
+#      build path would pull the generic eugr/spark-vllm runner and re-tag it
+#      under this name, which cannot serve this model.
+#   2. ./hf-download.sh nvidia/GLM-5.3-Flash-NVFP4
+#      ./hf-download.sh incoai/GLM-5.3-Flash-DFlash2   (drafter, 2.2 GB)
+#      The drafter is NOT covered by this recipe's model: field or --setup;
+#      HF_HUB_OFFLINE below means it must be in the cache before launch.
+#
+# Notes:
+#   - Readiness takes ~15 minutes (shard load dominates). Poll /health; /v1/models
+#     returns 200 from config alone even with a dead engine.
+#   - Healthy drafter acceptance (spec_decode_num_accepted_tokens_total /
+#     ..._num_draft_tokens_total on /metrics) is 0.6-0.8; ~0.35 on count prompts
+#     means a corrupt drafter copy (GLM repo issue #7) - re-download it.
+#   - Keep max_num_batched_tokens at 8192: the KV pin makes vLLM skip memory
+#     profiling, and 16384 died NVRM NV_ERR_NO_MEMORY on both nodes.
+#   - Do not raise max_model_len on TP2; 1M variants starved the pool and
+#     crashed the fleet three times on 2026-09-01.
+#   - Optional tuning: num_speculative_tokens=5 wins under deep concurrency
+#     (C>=4); keep 7 for single-stream. Fleet with a non-default RoCE subnet may
+#     need -e NCCL_IB_ADDR_RANGE=<subnet>/24; renamed IB port: -e B12X_ROCE_HCA=...
+
+recipe_version: "1"
+name: GLM-5.3-Flash-NVFP4-DFlash2
+description: vLLM serving nvidia/GLM-5.3-Flash-NVFP4 with the incoai DFlash2 drafter on a dual DGX Spark cluster
+
+model: nvidia/GLM-5.3-Flash-NVFP4
+container: ghcr.io/tonyd2wild/vllm-glm53-flash:sm121-v11-dflash2
+
+cluster_only: true
+
+# Runtime overlays (kpool fix, #18 prefix-cache repair, chat template, RoCE
+# adapter) + the unified-memory cache-drop loop this stack requires.
+mods:
+  - mods/glm53-dflash2
+  - mods/drop-caches
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 2
+  gpu_memory_utilization: 0.85   # 0.78-0.80 starve KV; 0.87 unreachable on every node
+  max_model_len: 262144          # do not raise on TP2 (see header)
+  max_num_seqs: 6
+  max_num_batched_tokens: 8192   # keep; KV pin skips profiling (see header)
+  num_speculative_tokens: 7      # drafter block_size 8 - 1
+  block_size: 2304               # DeepGEMM arch-12 fp8 paged-MQA needs 64-entry pool pages
+  kv_cache_memory: 8589934592    # 8 GiB pin -> ~714K token pool on the nvidia quant
+
+env:
+  # Boot hardening from the source launcher (kernel caches persist via the
+  # cluster's default cache-dir mounts, so no *_CACHE_DIR is needed here).
+  TORCH_CUDA_ARCH_LIST: "12.1a"
+  FLASHINFER_CUDA_ARCH_LIST: "12.1a"
+  FLASHINFER_DISABLE_VERSION_CHECK: "1"
+  MAX_JOBS: "2"                  # no nvcc storm during the post-load profile
+  FLASHINFER_NVCC_THREADS: "1"
+  VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  # RoCE fabric (NIC names come from .env via launch-cluster.sh).
+  NCCL_NET: "IB"
+  NCCL_IB_GID_INDEX: "3"
+  NCCL_IB_ROCE_VERSION_NUM: "2"
+  NCCL_IB_ADDR_FAMILY: "AF_INET"
+  NCCL_NVLS_ENABLE: "0"
+  NCCL_CROSS_NIC: "0"
+  NCCL_IB_MERGE_NICS: "0"
+  NCCL_CUMEM_ENABLE: "0"
+  NCCL_DEBUG: "WARN"
+  TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
+  # b12x RoCE one-shot all-reduce (+5-18% aggregate). Applied by
+  # mods/glm53-dflash2 only when the b12x runtime is in the image; the
+  # variables are inert otherwise (stock NCCL all-reduce).
+  VLLM_ENABLE_ROCE_ALLREDUCE: "1"
+  VLLM_ROCE_ALLREDUCE_MAX_SIZE: "2MB"
+  VLLM_ROCE_ALLGATHER_MAX_SIZE: "16MB"
+  VLLM_ROCE_ALLGATHER_ENABLE: "1"
+  B12X_ROCE_HCA: "rocep1s0f0"
+  B12X_ROCE_GID_INDEX: "3"
+  B12X_ROCE_SPIN_LIMIT: "300000000"
+  B12X_ROCE_CACHE_DIR: "/opt/b12x-roce/cache"
+
+command: |
+  vllm serve nvidia/GLM-5.3-Flash-NVFP4 \
+    --served-model-name glm-5.3-flash \
+    --host {host} \
+    --port {port} \
+    --trust-remote-code \
+    --tensor-parallel-size {tensor_parallel} \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --max-model-len {max_model_len} \
+    --max-num-seqs {max_num_seqs} \
+    --block-size {block_size} \
+    --moe-backend marlin \
+    --speculative-config '{{"method":"dflash","model":"incoai/GLM-5.3-Flash-DFlash2","num_speculative_tokens":{num_speculative_tokens}}}' \
+    --kv-cache-dtype fp8_e4m3 \
+    --kv-cache-memory {kv_cache_memory} \
+    --enforce-eager \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --tool-call-parser glm47 \
+    --enable-auto-tool-choice \
+    --reasoning-parser glm45 \
+    --default-chat-template-kwargs '{{"enable_thinking":false}}' \
+    --chat-template /opt/glm53-dflash2/chat_template_mm.jinja \
+    --limit-mm-per-prompt '{{"image":2,"video":0}}'
