@@ -1,0 +1,70 @@
+# Recipe: GLM-5.3-Flash-NVFP4 with DFlash2 speculative decoding
+# Dual DGX Spark (GB10 / SM121), TP=2, drafter from incoai/GLM-5.3-Flash-DFlash2.
+# Ports the sibling repo GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark
+# (launch-glm53-vllm-tp2-dflash2.sh) onto the standard vllm-node image via the
+# glm-5.3-dflash2 mod. Measured ~46.9 tok/s decode (vs ~21.8 tok/s MTP-4).
+
+recipe_version: "1"
+name: GLM-5.3-Flash-NVFP4-DFlash2
+description: vLLM serving nvidia/GLM-5.3-Flash-NVFP4 with DFlash2 speculative decoding on 2x DGX Spark
+
+model: nvidia/GLM-5.3-Flash-NVFP4
+container: vllm-node
+
+cluster_only: true
+
+mods:
+  - mods/glm-5.3-dflash2
+
+defaults:
+  port: 8000
+  host: 0.0.0.0
+  tensor_parallel: 2
+  gpu_memory_utilization: 0.85
+  max_model_len: 262144
+  max_num_seqs: 6
+  max_num_batched_tokens: 8192
+  # block_size: 2304 is co-designed with patch_glm5_drafter_group.py's
+  # exact-fit gate (multiple of 64 for FlashInfer SWA kernel sizes AND a
+  # multiple of the MLA page). Do not override.
+  block_size: 2304
+  num_speculative_tokens: 7
+  # 8 GiB pinned FP8 KV pool (~714k tokens at 262k ctx on the shipped build).
+  kv_cache_memory_bytes: 8589934592
+  drafter_model: incoai/GLM-5.3-Flash-DFlash2
+
+env:
+  # Keep JIT compilers (nvcc, flashinfer, triton) from oversubscribing the
+  # unified-memory nodes; MAX_JOBS=2 + single-threaded nvcc avoids OOM-kill
+  # during warmup on GB10.
+  MAX_JOBS: "2"
+  FLASHINFER_NVCC_THREADS: "1"
+  TORCH_CUDA_ARCH_LIST: "12.1a"
+  FLASHINFER_CUDA_ARCH_LIST: "12.1a"
+  FLASHINFER_DISABLE_VERSION_CHECK: "1"
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+  VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+
+command: |
+  vllm serve nvidia/GLM-5.3-Flash-NVFP4 \
+    --served-model-name glm-5.3-flash \
+    --host {host} \
+    --port {port} \
+    --trust-remote-code \
+    --tensor-parallel-size {tensor_parallel} \
+    --gpu-memory-utilization {gpu_memory_utilization} \
+    --max-model-len {max_model_len} \
+    --max-num-seqs {max_num_seqs} \
+    --max-num-batched-tokens {max_num_batched_tokens} \
+    --block-size {block_size} \
+    --moe-backend marlin \
+    --enforce-eager \
+    --kv-cache-dtype fp8_e4m3 \
+    --kv-cache-memory {kv_cache_memory_bytes} \
+    --speculative-config '{{"method":"dflash","model":"{drafter_model}","num_speculative_tokens":{num_speculative_tokens}}}' \
+    --reasoning-parser glm45 \
+    --tool-call-parser glm47 \
+    --enable-auto-tool-choice \
+    --default-chat-template-kwargs '{{"enable_thinking":false}}' \
+    --chat-template chat_template_mm.jinja \
+    --limit-mm-per-prompt '{{"image":2,"video":0}}'
