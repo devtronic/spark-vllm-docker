@@ -29,7 +29,19 @@ name: GLM-5.3-Flash-FP4-Local-DFlash2
 description: vLLM serving nvidia/GLM-5.3-Flash-FP4-Local with DFlash2 speculative decoding on 2x DGX Spark
 
 model: nvidia/GLM-5.3-Flash-FP4-Local
-container: vllm-node
+container: vllm-node-b12x
+
+# The B12X-built image is required for this checkpoint even though we use
+# DFlash2 (not MTP) speculative decoding. The reason is purely the loader:
+# nvidia/GLM-5.3-Flash-FP4-Local ships an FP8-quantized vision tower with
+# per-weight scale tensors (blocks.*.attn.proj.weight_scale) and nests the
+# native-QB shard under tensors/. The default vLLM loader does neither;
+# --load-format b12x handles both. The compute backends (attention / MoE /
+# linear) stay on their vLLM defaults - we are NOT selecting --attention-
+# backend B12X here because DFlash2's speculator path has only been proven
+# against the stock backends.
+build_args:
+  - --exp-b12x
 
 cluster_only: true
 
@@ -89,6 +101,7 @@ command: |
     --enforce-eager \
     --kv-cache-dtype fp8_e4m3 \
     --kv-cache-memory {kv_cache_memory_bytes} \
+    --load-format b12x \
     --speculative-config '{{"method":"dflash","model":"{drafter_model}","num_speculative_tokens":{num_speculative_tokens}}}' \
     --reasoning-parser glm45 \
     --tool-call-parser glm47 \
