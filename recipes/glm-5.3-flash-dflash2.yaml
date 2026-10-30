@@ -1,14 +1,34 @@
-# Recipe: GLM-5.3-Flash-NVFP4 with DFlash2 speculative decoding
+# Recipe: GLM-5.3-Flash-FP4-Local with DFlash2 speculative decoding
 # Dual DGX Spark (GB10 / SM121), TP=2, drafter from incoai/GLM-5.3-Flash-DFlash2.
-# Ports the sibling repo GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark
-# (launch-glm53-vllm-tp2-dflash2.sh) onto the standard vllm-node image via the
-# glm-5.3-dflash2 mod. Measured ~46.9 tok/s decode (vs ~21.8 tok/s MTP-4).
+# Companion to recipes/glm-5.3-flash.yaml (MTP on vllm-node-b12x). This recipe
+# runs on the standard vllm-node image because upstream vLLM now ships DFlash2
+# natively (DFlash2DraftModel + DFlash2Qwen3ForCausalLM registered, speculator
+# bundled, Glm5Next already has EagleModelMixin + aux-hidden-state capture, and
+# the GLM-5-Next KV grouping has been refactored out of kv_cache_utils.py).
+# The paired mod only stages the multimodal chat template; see
+# mods/glm-5.3-dflash2/README.md.
+#
+# Measured ~46.9 tok/s decode on the sibling repo's bespoke stack
+# (GLM-5.3-Flash-NVFP4-DFlash2-2x-DGX-Spark/launch-glm53-vllm-tp2-dflash2.sh),
+# vs ~21.8 tok/s MTP-4. Flag set below is lifted verbatim from that launcher.
+#
+# First-run note: the target model nvidia/GLM-5.3-Flash-FP4-Local is ~180 GB
+# and the drafter incoai/GLM-5.3-Flash-DFlash2 is ~2.2 GB. Both are pulled from
+# HF Hub on first launch and the engine blocks silently inside hf_hub_download
+# while that happens. Pre-fetch both on BOTH nodes to avoid an hour-long cold
+# boot:
+#   ./run-recipe.sh --download-only glm-5.3-flash-dflash2
+#   docker run --rm -v ~/.cache/huggingface:/root/.cache/huggingface vllm-node \
+#     python3 -c "from huggingface_hub import snapshot_download; \
+#                 snapshot_download('incoai/GLM-5.3-Flash-DFlash2')"
+# (The drafter isn't exposed through the recipe's `model:` field - it ships
+# only inside --speculative-config - so --download-only alone won't fetch it.)
 
 recipe_version: "1"
-name: GLM-5.3-Flash-NVFP4-DFlash2
-description: vLLM serving nvidia/GLM-5.3-Flash-NVFP4 with DFlash2 speculative decoding on 2x DGX Spark
+name: GLM-5.3-Flash-FP4-Local-DFlash2
+description: vLLM serving nvidia/GLM-5.3-Flash-FP4-Local with DFlash2 speculative decoding on 2x DGX Spark
 
-model: nvidia/GLM-5.3-Flash-NVFP4
+model: nvidia/GLM-5.3-Flash-FP4-Local
 container: vllm-node
 
 cluster_only: true
@@ -20,13 +40,21 @@ defaults:
   port: 8000
   host: 0.0.0.0
   tensor_parallel: 2
-  gpu_memory_utilization: 0.85
+  # The sibling repo's launcher runs at 0.85, but it drops filesystem caches
+  # (sync; echo 3 > /proc/sys/vm/drop_caches) on both nodes before every
+  # launch. Without that preamble, the Spark's UMA memory floor sits around
+  # 79-80% free, so 0.78 lets a cold start succeed without manual
+  # intervention. For peak KV capacity, drop caches on both nodes first and
+  # override with --gpu-memory-utilization 0.85 on the CLI.
+  gpu_memory_utilization: 0.78
   max_model_len: 262144
   max_num_seqs: 6
   max_num_batched_tokens: 8192
-  # block_size: 2304 is co-designed with patch_glm5_drafter_group.py's
-  # exact-fit gate (multiple of 64 for FlashInfer SWA kernel sizes AND a
-  # multiple of the MLA page). Do not override.
+  # block_size 2304 is the sibling launcher's value, co-designed with the old
+  # drafter-group KV layout gate. Upstream has refactored the GLM-5-Next KV
+  # grouping; if the recipe boots cleanly leave this alone, if it hits an
+  # allocator or kernel-block error try the vLLM default by passing
+  # --block-size 16 on the CLI.
   block_size: 2304
   num_speculative_tokens: 7
   # 8 GiB pinned FP8 KV pool (~714k tokens at 262k ctx on the shipped build).
@@ -46,7 +74,7 @@ env:
   VLLM_WORKER_MULTIPROC_METHOD: "spawn"
 
 command: |
-  vllm serve nvidia/GLM-5.3-Flash-NVFP4 \
+  vllm serve nvidia/GLM-5.3-Flash-FP4-Local \
     --served-model-name glm-5.3-flash \
     --host {host} \
     --port {port} \
